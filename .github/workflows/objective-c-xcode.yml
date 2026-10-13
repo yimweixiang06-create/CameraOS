@@ -102,11 +102,19 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
-      - name: Upload Xcode build log
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: YCam-xcodebuild-log
-          path: ${{ runner.temp }}/xcodebuild.log
-          if-no-files-found: warn
-          retention-days: 7
+- name: Locate Xcode project
+  shell: bash
+  run: |
+    echo "Repository files:"
+    find . -maxdepth 5 \( -name "*.xcodeproj" -o -name "*.xcworkspace" \) -print
+
+    PROJECT=$(find . -maxdepth 5 -type d -name "*.xcodeproj" -print -quit)
+
+    if [ -z "$PROJECT" ]; then
+      echo "Error: No valid .xcodeproj directory found."
+      echo "Please upload the actual Xcode project files."
+      exit 1
+    fi
+
+    echo "Found Xcode project: $PROJECT"
+    echo "PROJECT_PATH=$PROJECT" >> "$GITHUB_ENV"
