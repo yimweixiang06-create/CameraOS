@@ -1,0 +1,112 @@
+name: Build unsigned iOS IPA
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+      - master
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build YCam for Sideloadly
+    runs-on: macos-15
+    timeout-minutes: 30
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Show Xcode version and locate project
+        shell: bash
+        run: |
+          set -euo pipefail
+          xcodebuild -version
+          xcodebuild -showsdks
+
+          echo "Repository files:"
+          find . -maxdepth 4 \( -name '*.xcodeproj' -o -name '*.xcworkspace' -o -name 'Package.swift' \) -print
+
+          PROJECT="$(find . -maxdepth 6 -type d -name '*.xcodeproj' -print -quit)"
+          if [ -z "$PROJECT" ]; then
+            echo "::error::No .xcodeproj found in the repository. Upload the actual Xcode project/source files to GitHub."
+            exit 1
+          fi
+
+          echo "Found Xcode project: $PROJECT"
+          echo "PROJECT_PATH=$PROJECT" >> "$GITHUB_ENV"
+
+          xcodebuild -list -json -project "$PROJECT" | tee "$RUNNER_TEMP/xcode-list.json"
+
+          SCHEME="$(/usr/bin/python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); p=next(iter(d.get("project",{}).get("schemes",[])), "") ; print(p)' "$RUNNER_TEMP/xcode-list.json")"
+          if [ -z "$SCHEME" ]; then
+            echo "::error::Xcode found the project but no shared scheme. Open the project in Xcode and share a scheme, or inspect the xcodebuild -list output."
+            exit 1
+          fi
+          echo "Using scheme: $SCHEME"
+          echo "SCHEME_NAME=$SCHEME" >> "$GITHUB_ENV"
+
+      - name: Build unsigned iOS app
+        shell: bash
+        run: |
+          set -o pipefail
+          xcodebuild \
+            -project "$PROJECT_PATH" \
+            -scheme "$SCHEME_NAME" \
+            -configuration Release \
+            -sdk iphoneos \
+            -destination 'generic/platform=iOS' \
+            -derivedDataPath "$RUNNER_TEMP/DerivedData" \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            build 2>&1 | tee "$RUNNER_TEMP/xcodebuild.log"
+
+      - name: Verify app bundle
+        shell: bash
+        run: |
+          set -euo pipefail
+          PRODUCTS="$RUNNER_TEMP/DerivedData/Build/Products/Release-iphoneos"
+          APP="$(find "$PRODUCTS" -maxdepth 1 -type d -name '*.app' -print -quit)"
+          if [ -z "$APP" ]; then
+            echo "::error::Build completed without an .app bundle in $PRODUCTS"
+            ls -la "$PRODUCTS" || true
+            exit 1
+          fi
+          test -f "$APP/Info.plist"
+          echo "App bundle: $APP"
+          /usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$APP/Info.plist"
+          /usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$APP/Info.plist"
+          echo "APP_PATH=$APP" >> "$GITHUB_ENV"
+
+      - name: Package unsigned IPA
+        shell: bash
+        run: |
+          set -euo pipefail
+          IPA_ROOT="$RUNNER_TEMP/ipa"
+          mkdir -p "$IPA_ROOT/Payload"
+          ditto "$APP_PATH" "$IPA_ROOT/Payload/$(basename "$APP_PATH")"
+          (cd "$IPA_ROOT" && /usr/bin/zip -qry "$RUNNER_TEMP/YCam-unsigned.ipa" Payload)
+          test -s "$RUNNER_TEMP/YCam-unsigned.ipa"
+          unzip -l "$RUNNER_TEMP/YCam-unsigned.ipa" | head -30
+
+      - name: Upload unsigned IPA
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: YCam-unsigned-IPA
+          path: ${{ runner.temp }}/YCam-unsigned.ipa
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Upload Xcode build log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: YCam-xcodebuild-log
+          path: ${{ runner.temp }}/xcodebuild.log
+          if-no-files-found: warn
+          retention-days: 7
