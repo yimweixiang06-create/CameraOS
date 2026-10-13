@@ -1,4 +1,5 @@
-name: Build unsigned iOS IPA
+
+name: Build CameraOs IPA
 
 on:
   workflow_dispatch:
@@ -12,109 +13,168 @@ permissions:
 
 jobs:
   build:
-    name: Build YCam for Sideloadly
+    name: Build iOS IPA
     runs-on: macos-15
-    timeout-minutes: 30
+    timeout-minutes: 45
 
-       steps:
-      - name: Check out repository
+    steps:
+      - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
 
       - name: Show Xcode version and locate project
         shell: bash
         run: |
           set -euo pipefail
+
+          echo "================================"
+          echo "Xcode version"
+          echo "================================"
           xcodebuild -version
           xcodebuild -showsdks
 
-          echo "Repository files:"
-          find . -maxdepth 4 \( -name '*.xcodeproj' -o -name '*.xcworkspace' -o -name 'Package.swift' \) -print
+          echo "================================"
+          echo "Repository files"
+          echo "================================"
+          ls -la
+          find . -maxdepth 5 \
+            \( -name "*.xcodeproj" -o -name "*.xcworkspace" \) \
+            -not -path "./.git/*" -print
 
-          PROJECT="$(find . -maxdepth 6 -type d -name '*.xcodeproj' -print -quit)"
+          PROJECT="$(find . -maxdepth 5 \
+            -type d -name "*.xcodeproj" \
+            -not -path "./.git/*" \
+            -print -quit)"
+
           if [ -z "$PROJECT" ]; then
-            echo "::error::No .xcodeproj found in the repository. Upload the actual Xcode project/source files to GitHub."
+            echo "::error::No .xcodeproj directory found."
+            echo "Upload the complete Xcode project to the repository."
             exit 1
           fi
 
-          echo "Found Xcode project: $PROJECT"
+          PBXPROJ="${PROJECT}/project.pbxproj"
+
+          if [ ! -f "$PBXPROJ" ]; then
+            echo "::error::project.pbxproj is missing."
+            echo "Found project path: $PROJECT"
+            exit 1
+          fi
+
+          echo "Found project: $PROJECT"
           echo "PROJECT_PATH=$PROJECT" >> "$GITHUB_ENV"
 
-          xcodebuild -list -json -project "$PROJECT" | tee "$RUNNER_TEMP/xcode-list.json"
+      - name: List Xcode schemes
+        shell: bash
+        run: |
+          set -euo pipefail
 
-          SCHEME="$(/usr/bin/python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); p=next(iter(d.get("project",{}).get("schemes",[])), "") ; print(p)' "$RUNNER_TEMP/xcode-list.json")"
+          xcodebuild -list -json \
+            -project "$PROJECT_PATH" \
+            | tee xcode-list.json
+
+          SCHEME="$(python3 -c '
+          import json
+          import os
+          import sys
+
+          with open("xcode-list.json", encoding="utf-8") as f:
+              data = json.load(f)
+
+          project = data.get("project", {})
+          schemes = project.get("schemes", [])
+
+          project_name = os.path.basename(
+              os.environ["PROJECT_PATH"]
+          ).removesuffix(".xcodeproj")
+
+          if not schemes:
+              print("", end="")
+              sys.exit(0)
+
+          if project_name in schemes:
+              print(project_name)
+          else:
+              print(schemes[0])
+          ')"
+
           if [ -z "$SCHEME" ]; then
-            echo "::error::Xcode found the project but no shared scheme. Open the project in Xcode and share a scheme, or inspect the xcodebuild -list output."
+            echo "::error::No shared Xcode scheme found."
+            echo "Open the project in Xcode and ensure its scheme is shared."
             exit 1
           fi
-          echo "Using scheme: $SCHEME"
+
+          echo "Selected scheme: $SCHEME"
           echo "SCHEME_NAME=$SCHEME" >> "$GITHUB_ENV"
 
       - name: Build unsigned iOS app
         shell: bash
         run: |
           set -o pipefail
+
+          mkdir -p output
+
           xcodebuild \
             -project "$PROJECT_PATH" \
             -scheme "$SCHEME_NAME" \
             -configuration Release \
             -sdk iphoneos \
             -destination 'generic/platform=iOS' \
-            -derivedDataPath "$RUNNER_TEMP/DerivedData" \
+            -derivedDataPath "$RUNNER_TEMP/CameraOsDerivedData" \
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGN_IDENTITY="" \
-            build 2>&1 | tee "$RUNNER_TEMP/xcodebuild.log"
+            build 2>&1 | tee xcodebuild.log
 
-      - name: Verify app bundle
+      - name: Package IPA
         shell: bash
         run: |
           set -euo pipefail
-          PRODUCTS="$RUNNER_TEMP/DerivedData/Build/Products/Release-iphoneos"
-          APP="$(find "$PRODUCTS" -maxdepth 1 -type d -name '*.app' -print -quit)"
-          if [ -z "$APP" ]; then
-            echo "::error::Build completed without an .app bundle in $PRODUCTS"
-            ls -la "$PRODUCTS" || true
+
+          APP_DIR="$RUNNER_TEMP/CameraOsDerivedData/Build/Products/Release-iphoneos"
+
+          echo "Looking for built iOS app..."
+          ls -la "$APP_DIR"
+
+          APP_PATH="$(find "$APP_DIR" \
+            -maxdepth 1 \
+            -type d \
+            -name "*.app" \
+            -print -quit)"
+
+          if [ -z "$APP_PATH" ]; then
+            echo "::error::No .app was produced by the build."
             exit 1
           fi
-          test -f "$APP/Info.plist"
-          echo "App bundle: $APP"
-          /usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$APP/Info.plist"
-          /usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$APP/Info.plist"
-          echo "APP_PATH=$APP" >> "$GITHUB_ENV"
 
-      - name: Package unsigned IPA
-        shell: bash
-        run: |
-          set -euo pipefail
-          IPA_ROOT="$RUNNER_TEMP/ipa"
-          mkdir -p "$IPA_ROOT/Payload"
-          ditto "$APP_PATH" "$IPA_ROOT/Payload/$(basename "$APP_PATH")"
-          (cd "$IPA_ROOT" && /usr/bin/zip -qry "$RUNNER_TEMP/YCam-unsigned.ipa" Payload)
-          test -s "$RUNNER_TEMP/YCam-unsigned.ipa"
-          unzip -l "$RUNNER_TEMP/YCam-unsigned.ipa" | head -30
+          if [ ! -f "$APP_PATH/Info.plist" ]; then
+            echo "::error::The built app has no Info.plist."
+            exit 1
+          fi
 
-      - name: Upload unsigned IPA
-        if: success()
+          rm -rf "$RUNNER_TEMP/ipa-package"
+          mkdir -p "$RUNNER_TEMP/ipa-package/Payload"
+
+          cp -R "$APP_PATH" "$RUNNER_TEMP/ipa-package/Payload/"
+
+          (
+            cd "$RUNNER_TEMP/ipa-package"
+            /usr/bin/zip -qry \
+              "$GITHUB_WORKSPACE/output/CameraOs-unsigned.ipa" \
+              Payload
+          )
+
+          echo "IPA package created:"
+          ls -lh output/CameraOs-unsigned.ipa
+
+      - name: Upload IPA and build logs
+        if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: YCam-unsigned-IPA
-          path: ${{ runner.temp }}/YCam-unsigned.ipa
-          if-no-files-found: error
+          name: CameraOs-iOS-Build
+          path: |
+            output/*.ipa
+            xcodebuild.log
+            xcode-list.json
+          if-no-files-found: warn
           retention-days: 7
-
-      - name: Locate Xcode project
-        shell: bash
-        run: |
-          echo "Repository files:"
-       find . -maxdepth 5 \( -name "*.xcodeproj" -o -name "*.xcworkspace" \) -print
-
-        PROJECT=$(find . -maxdepth 5 -type d -name "*.xcodeproj" -print -quit)
-
-        if [ -z "$PROJECT" ]; then
-      echo "Error: No valid .xcodeproj directory found."
-      echo "Please upload the actual Xcode project files."
-      exit 1
-    fi
-
-    echo "Found Xcode project: $PROJECT"
-    echo "PROJECT_PATH=$PROJECT" >> "$GITHUB_ENV"
