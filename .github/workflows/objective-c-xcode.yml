@@ -105,7 +105,7 @@ jobs:
       - name: Locate Xcode project
         shell: bash
         run: |
-        echo "Repository files:"
+          echo "Repository files:"
        find . -maxdepth 5 \( -name "*.xcodeproj" -o -name "*.xcworkspace" \) -print
 
         PROJECT=$(find . -maxdepth 5 -type d -name "*.xcodeproj" -print -quit)
