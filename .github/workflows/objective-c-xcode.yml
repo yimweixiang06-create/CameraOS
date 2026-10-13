@@ -16,7 +16,7 @@ jobs:
     runs-on: macos-15
     timeout-minutes: 30
 
-    steps:
+       steps:
       - name: Check out repository
         uses: actions/checkout@v4
 
